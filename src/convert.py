@@ -295,7 +295,7 @@ def main():
     parser.add_argument("inputs", nargs='+', help="Input .bag files or a folder")
     parser.add_argument("--series", action="store_true", help="Treat inputs as a split sequence")
     parser.add_argument("--distro", default="humble", help="ROS distro for metadata")
-    parser.add_argument("--out-dir", type=Path, default=None, help="Force a specific output directory")
+    parser.add_argument("-o", "--out-dir", type=Path, default=None, help="Force a specific output directory")
     parser.add_argument("--split-size", default=None, help="Split output files by size (e.g., 3G, 500M)")
     parser.add_argument("--with-plugins", action="store_true", help="Enable custom processing plugins from plugins.yaml")
     parser.add_argument("--dry-run", action="store_true", help="Validate paths and config without running conversion")
