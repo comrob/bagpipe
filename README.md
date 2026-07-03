@@ -17,7 +17,7 @@ We provide a demo script that **automatically downloads test bagfiles** and runs
 ## TL;DR
 
 ```bash
-bash ./install.sh
+bash ./scripts/install.sh
 
 # Basic conversion (Single File)
 convert_bag /path/to/single_ros1.bag
@@ -43,7 +43,10 @@ This repository provides a containerized solution for two primary tasks:
 ## Prerequisites
 
 * **Docker:** Ensure Docker and Docker Compose are installed.
+  * basic installaiton: https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository
 * **Permissions:** The current user must have permission to run Docker commands (e.g., be in the `docker` group).
+  * post-installation steps: https://docs.docker.com/engine/install/linux-postinstall
+
 
 ---
 
@@ -56,7 +59,7 @@ The converter runs as an ephemeral container. It mounts the target data director
 Run the provided installation script to create a symbolic link for the execution wrapper and pull the docker image.
 
 ```bash
-./install.sh
+./scripts/install.sh
 
 ```
 
@@ -263,7 +266,7 @@ If your host supports X11 forwarding, you can run GUI tools (`rviz`) directly.
 * [x] **Auto-splitting:** Series conversion with static TF injection is implemented.
 * [x] **Plugin System V2:** Parametric configuration, 1-to-N message expansion, and timestamp injection.
 * [x] **Topic Filtering:** Added `--skip-topics` argument to blacklist unwanted data.
-* [x] **Automated Image Publishing:** CI/CD scripts (`publish-image.sh`) are in place.
+* [x] **Automated Image Publishing:** CI/CD scripts (`scripts/build-image.sh`, `scripts/push-image.sh`) are in place.
 * [x] **Pre-Flight Checks:** Implement a `--dry-run` mode to validate paths and disk space.
 * [x] **UX:** Added `tqdm` progress bars and detailed summary reports.
 
@@ -276,4 +279,5 @@ If your host supports X11 forwarding, you can run GUI tools (`rviz`) directly.
 To update the system dependencies (Dockerfile):
 
 1. **Login:** `echo $GITHUB_TOKEN | docker login ghcr.io -u USER --password-stdin`
-2. **Publish:** `./publish-image.sh`
+2. **Build:** `./scripts/build-image.sh`
+3. **Push:** `./scripts/push-image.sh`
