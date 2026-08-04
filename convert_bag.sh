@@ -28,15 +28,71 @@ fi
 # 1. DETERMINISTIC MOUNT CALCULATION
 # ==============================================================================
 
-# A. Handle INPUT (Assume $1 is always the input)
+# A. Handle INPUT (first positional path, options may come first)
 # ------------------------------------------------------------------------------
-INPUT_ABS=$(realpath -m "$1")
+ARGS=("$@")
+INPUT_RAW=""
+skip_next_scan=false
+skip_topics_scan=false
+
+for ((i=0; i<${#ARGS[@]}; i++)); do
+    arg="${ARGS[i]}"
+
+    if [[ "$skip_next_scan" == true ]]; then
+        skip_next_scan=false
+        continue
+    fi
+
+    if [[ "$skip_topics_scan" == true ]]; then
+        if [[ "$arg" == -* ]]; then
+            skip_topics_scan=false
+        else
+            continue
+        fi
+    fi
+
+    if [[ "$arg" == "--" ]]; then
+        NEXT_IDX=$((i+1))
+        if (( NEXT_IDX < ${#ARGS[@]} )); then
+            INPUT_RAW="${ARGS[NEXT_IDX]}"
+        fi
+        break
+    fi
+
+    case "$arg" in
+        --out-dir|-o|--split-size|--distro)
+            skip_next_scan=true
+            continue
+            ;;
+        --skip-topics)
+            skip_topics_scan=true
+            continue
+            ;;
+        --out-dir=*|-o=*|--split-size=*|--distro=*)
+            continue
+            ;;
+        -*)
+            continue
+            ;;
+        *)
+            INPUT_RAW="$arg"
+            break
+            ;;
+    esac
+done
+
+if [[ -z "$INPUT_RAW" ]]; then
+    echo "Error: missing input path."
+    echo "Usage: convert_bag <input_path> [options]"
+    exit 1
+fi
+
+INPUT_ABS=$(realpath -m -- "$INPUT_RAW")
 MOUNT_HOST=$(dirname "$INPUT_ABS")
 
 # B. Handle OUTPUT (Scan specifically for --out-dir)
 # ------------------------------------------------------------------------------
 OUTPUT_ABS=""
-ARGS=("$@")
 for ((i=0; i<$#; i++)); do
     arg="${ARGS[i]}"
     raw_out=""
@@ -53,7 +109,7 @@ for ((i=0; i<$#; i++)); do
         # Ensure output directory exists on host
         mkdir -p "$raw_out"
 
-        OUTPUT_ABS=$(realpath -m "$raw_out")
+        OUTPUT_ABS=$(realpath -m -- "$raw_out")
 
         # Expand MOUNT_HOST to include this output path
         while [[ "$OUTPUT_ABS" != "$MOUNT_HOST"* ]]; do
@@ -74,7 +130,7 @@ for arg in "$@"; do
     if [ "$skip_next" = true ]; then
         # The previous argument was --out-dir/-o; relativize its value.
         if [[ -n "$OUTPUT_ABS" ]]; then
-            REL_PATH=$(realpath -m --relative-to="$MOUNT_HOST" "$OUTPUT_ABS")
+            REL_PATH=$(realpath -m --relative-to="$MOUNT_HOST" -- "$OUTPUT_ABS")
             PY_ARGS="$PY_ARGS $REL_PATH"
         else
             PY_ARGS="$PY_ARGS $arg"
@@ -94,8 +150,8 @@ for arg in "$@"; do
         FLAG_NAME="${arg%%=*}"
         FLAG_VALUE="${arg#*=}"
 
-        if [[ -n "$OUTPUT_ABS" && "$(realpath -m "$FLAG_VALUE")" == "$OUTPUT_ABS" ]]; then
-            REL_PATH=$(realpath -m --relative-to="$MOUNT_HOST" "$OUTPUT_ABS")
+        if [[ -n "$OUTPUT_ABS" && "$(realpath -m -- "$FLAG_VALUE")" == "$OUTPUT_ABS" ]]; then
+            REL_PATH=$(realpath -m --relative-to="$MOUNT_HOST" -- "$OUTPUT_ABS")
             PY_ARGS="$PY_ARGS $FLAG_NAME=$REL_PATH"
         else
             PY_ARGS="$PY_ARGS $arg"
@@ -110,13 +166,13 @@ for arg in "$@"; do
     fi
 
     # Case 1: It matches the known INPUT path
-    if [[ "$(realpath -m "$arg")" == "$INPUT_ABS" ]]; then
-        REL_PATH=$(realpath -m --relative-to="$MOUNT_HOST" "$INPUT_ABS")
+    if [[ "$(realpath -m -- "$arg")" == "$INPUT_ABS" ]]; then
+        REL_PATH=$(realpath -m --relative-to="$MOUNT_HOST" -- "$INPUT_ABS")
         PY_ARGS="$PY_ARGS $REL_PATH"
 
     # Case 2: It matches the known OUTPUT path
-    elif [[ -n "$OUTPUT_ABS" && "$(realpath -m "$arg")" == "$OUTPUT_ABS" ]]; then
-        REL_PATH=$(realpath -m --relative-to="$MOUNT_HOST" "$OUTPUT_ABS")
+    elif [[ -n "$OUTPUT_ABS" && "$(realpath -m -- "$arg")" == "$OUTPUT_ABS" ]]; then
+        REL_PATH=$(realpath -m --relative-to="$MOUNT_HOST" -- "$OUTPUT_ABS")
         PY_ARGS="$PY_ARGS $REL_PATH"
         
     # Case 3: Pass everything else through untouched (Topics, Numbers, etc)

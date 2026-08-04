@@ -22,3 +22,12 @@ plugins:
   # DebayerDebugPlugin:
   #   target_topic: "camera_front"
   #   jpeg_quality: 95
+
+  # -------------------------------------------------------------------
+  # 4. Legged Odometry Pose -> Odometry
+  # Keeps original pose topic and emits nav_msgs/Odometry with zero twist.
+  # -------------------------------------------------------------------
+  PoseToOdometryPlugin:
+    input_topic: "/legged_odometry/pose_in_odom"
+    output_topic: "/legged_odometry/odom"
+    child_frame_id: "base"

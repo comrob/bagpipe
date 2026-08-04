@@ -96,13 +96,19 @@ convert_bag /path/to/data_folder --series
 
 The converter features a modular plugin architecture allowing users to manipulate messages during the conversion process (e.g., parsing raw strings, debayering images, or anonymizing data).
 
+There are two plugin layers:
+
+* **System plugins (always on):** loaded from `src/system_plugins/`, configured in `src/system_plugins.yaml`, intended for compatibility and safety.
+* **User plugins (optional):** loaded from `src/plugins/` when `--with-plugins` is used, intended for project-specific transformations.
+
 #### Architecture
 
 The system uses a **hook-based architecture**:
 
-1. **Loader:** `plugin_manager.py` scans the `src/plugins/` directory.
-2. **Configuration:** It reads `src/plugins.yaml` to configure active plugins and pass parameters (e.g., topic names, quality settings).
-3. **Execution:** Plugins are initialized with their config. They process messages and can return **multiple** new messages (1-to-N expansion) or modify messages in place.
+1. **System Loader:** `plugin_manager.py` scans `src/system_plugins/` and loads system plugins by default.
+2. **User Loader:** `plugin_manager.py` scans `src/plugins/` for optional user plugins.
+3. **Configuration:** It reads `src/system_plugins.yaml` for system plugins and `src/plugins.yaml` for user plugins.
+4. **Execution:** System plugins run first (pre-conversion guardrails), then user plugins run on converted ROS2 messages.
 
 #### Configuration
 

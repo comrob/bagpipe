@@ -35,11 +35,18 @@ class BagSeriesConverter:
         self.current_topic_errors = {}
         
         self.plugin_dir = Path(__file__).parent / "plugins"
+        self.system_plugin_dir = Path(__file__).parent / "system_plugins"
         self.plugin_config_path = None
+        self.system_plugin_config_path = Path(__file__).parent / "system_plugins.yaml"
         if enable_plugins:
             self.plugin_config_path = Path(__file__).parent / "plugins.yaml"
         
-        self.plugin_manager = PluginManager(self.plugin_dir, self.plugin_config_path)
+        self.plugin_manager = PluginManager(
+            plugin_dir_path=self.plugin_dir,
+            config_path=self.plugin_config_path,
+            system_plugin_dir_path=self.system_plugin_dir,
+            system_config_path=self.system_plugin_config_path,
+        )
 
     def init_stores(self):
         print(f"[INFO] Initializing Stores...")
@@ -69,8 +76,8 @@ class BagSeriesConverter:
             
             # ... [Initialize maps... Same as before] ...
             topic_to_chan_id = {}
+            topic_to_type = {}
             conn_map = {}
-            type_map = {}
             registered_schemas = {}
 
             try:
@@ -138,10 +145,10 @@ class BagSeriesConverter:
                             metadata=meta
                         )
                         topic_to_chan_id[conn.topic] = cid
+                        topic_to_type[conn.topic] = ros2_type
                         current_stats["topics"][conn.topic] = {"count": 0, "type": ros2_type}
 
                     conn_map[conn.id] = topic_to_chan_id[conn.topic]
-                    type_map[conn.id] = ros2_type
 
                 # --- INJECTION LOGIC ---
                 if is_part_of_series and self.static_tf_cache and not self.exiter.stop_requested:
@@ -214,47 +221,62 @@ class BagSeriesConverter:
                             }
                             writer.just_rotated = False
 
-                        ros2_t = type_map[conn.id]
                         try:
                             ros1_msg = self.store_ros1.deserialize_ros1(raw_data, conn.msgtype)
-                            ros2_msg = convert_utils.convert_ros1_to_ros2(ros1_msg, ros2_t, self.store_ros2)
-                            
-                            emissions = self.plugin_manager.run_plugins(conn.topic, ros2_msg, ros2_t, timestamp)
-                            
-                            for (out_topic, out_msg, out_type, out_def) in emissions:
-                                if out_msg is None: continue
+                            pre_emissions = self.plugin_manager.run_system_plugins(conn.topic, ros1_msg, conn.msgtype, timestamp)
+
+                            for (pre_topic, pre_msg, pre_type, _) in pre_emissions:
+                                if pre_msg is None:
+                                    continue
+
+                                # Keep blacklist behavior even if system plugin rewrites topics.
+                                if pre_topic in self.skip_topics:
+                                    continue
+
+                                ros2_type_for_msg = convert_utils.to_ros2_type(pre_type)
+                                ros2_msg = convert_utils.convert_ros1_to_ros2(pre_msg, ros2_type_for_msg, self.store_ros2)
+
+                                emissions = self.plugin_manager.run_user_plugins(pre_topic, ros2_msg, ros2_type_for_msg, timestamp)
+
+                                for (out_topic, out_msg, out_type, out_def) in emissions:
+                                    if out_msg is None: continue
                                 
-                                # [MODIFIED] Check blacklist for plugin emissions
-                                if out_topic in self.skip_topics: continue
+                                    # [MODIFIED] Check blacklist for plugin emissions
+                                    if out_topic in self.skip_topics: continue
 
-                                if out_topic not in topic_to_chan_id:
-                                    if out_type not in registered_schemas:
-                                        schema_text = out_def
-                                        if schema_text is None: schema_text = get_std_def(out_type)
-                                        if schema_text is None: schema_text = f"# Definition for {out_type} missing"
+                                    if out_topic in topic_to_type and topic_to_type[out_topic] != out_type:
+                                        safe_type_suffix = out_type.replace("/", "_")
+                                        out_topic = f"{out_topic}__{safe_type_suffix}"
 
-                                        sid = writer.register_schema(name=out_type, encoding=SchemaEncoding.ROS2, data=schema_text.encode('utf-8'))
-                                        registered_schemas[out_type] = sid
+                                    if out_topic not in topic_to_chan_id:
+                                        if out_type not in registered_schemas:
+                                            schema_text = out_def
+                                            if schema_text is None: schema_text = get_std_def(out_type)
+                                            if schema_text is None: schema_text = f"# Definition for {out_type} missing"
+
+                                            sid = writer.register_schema(name=out_type, encoding=SchemaEncoding.ROS2, data=schema_text.encode('utf-8'))
+                                            registered_schemas[out_type] = sid
+                                        
+                                        cid = writer.register_channel(topic=out_topic, message_encoding=MessageEncoding.CDR, schema_id=registered_schemas[out_type], metadata={"offered_qos_profiles": ""})
+                                        topic_to_chan_id[out_topic] = cid
+                                        topic_to_type[out_topic] = out_type
+                                        current_stats["topics"][out_topic] = {"count": 0, "type": out_type}
+
+                                    cdr_bytes = self.store_ros2.serialize_cdr(out_msg, out_type)
+
+                                    writer.add_message(channel_id=topic_to_chan_id[out_topic], log_time=int(timestamp), publish_time=int(timestamp), data=cdr_bytes)
+
+                                    if out_topic == convert_utils.TF_STATIC_TOPIC: self.static_tf_cache.append(out_msg)
+
+                                    if out_topic in current_stats["topics"]:
+                                        current_stats["topics"][out_topic]["count"] += 1
+                                    else:
+                                        current_stats["topics"][out_topic] = {"count": 1, "type": out_type}
                                     
-                                    cid = writer.register_channel(topic=out_topic, message_encoding=MessageEncoding.CDR, schema_id=registered_schemas[out_type], metadata={"offered_qos_profiles": ""})
-                                    topic_to_chan_id[out_topic] = cid
-                                    current_stats["topics"][out_topic] = {"count": 0, "type": out_type}
-
-                                cdr_bytes = self.store_ros2.serialize_cdr(out_msg, out_type)
-
-                                writer.add_message(channel_id=topic_to_chan_id[out_topic], log_time=int(timestamp), publish_time=int(timestamp), data=cdr_bytes)
-
-                                if out_topic == convert_utils.TF_STATIC_TOPIC: self.static_tf_cache.append(out_msg)
-
-                                if out_topic in current_stats["topics"]:
-                                    current_stats["topics"][out_topic]["count"] += 1
-                                else:
-                                    current_stats["topics"][out_topic] = {"count": 1, "type": out_type}
-                                
-                                if out_topic == conn.topic: current_stats["message_count"] += 1
-                                    
-                                if current_stats["start_time"] is None or timestamp < current_stats["start_time"]: current_stats["start_time"] = timestamp
-                                if current_stats["end_time"] is None or timestamp > current_stats["end_time"]: current_stats["end_time"] = timestamp
+                                    current_stats["message_count"] += 1
+                                        
+                                    if current_stats["start_time"] is None or timestamp < current_stats["start_time"]: current_stats["start_time"] = timestamp
+                                    if current_stats["end_time"] is None or timestamp > current_stats["end_time"]: current_stats["end_time"] = timestamp
                         
                         except Exception as e:
                             print(f"[ERR] Conversion failed on topic {conn.topic}: {e}", file=sys.stderr)

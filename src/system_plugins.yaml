@@ -1,0 +1,15 @@
+system_plugins:
+  CompatibilityTranslatorSystemPlugin:
+    translate_types:
+      - dynamic_reconfigure/Config
+      - dynamic_reconfigure/ConfigDescription
+      - dynamic_reconfigure/msg/Config
+      - dynamic_reconfigure/msg/ConfigDescription
+      - visualization_msgs/Marker
+      - visualization_msgs/MarkerArray
+      - visualization_msgs/msg/Marker
+      - visualization_msgs/msg/MarkerArray
+      - rosgraph_msgs/Log
+      - rosgraph_msgs/msg/Log
+    target_type: std_msgs/msg/String
+    topic_suffix: _translated
