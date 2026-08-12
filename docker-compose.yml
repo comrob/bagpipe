@@ -20,13 +20,13 @@ services:
     command: tail -f /dev/null
 
   converter:
-    image: ghcr.io/comrob/ros_bag_converter:latest
+    image: ghcr.io/comrob/ros_bag_converter:${BAGPIPE_IMAGE_TAG:-latest}
     build: .
     container_name: bag_converter_runner
     restart: "no"
     user: "${CURRENT_UID:-1000}:${CURRENT_GID:-1000}"
-    working_dir: /data
+    # Data volumes and the working directory are supplied per invocation by
+    # bagpipe, which mounts host paths at their own paths inside the container.
     volumes:
       - ./src:/home/dev/src
-      - ${HOST_DATA_DIR:-.}:/data
     command: python3 /home/dev/src/convert.py --help

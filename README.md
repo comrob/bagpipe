@@ -1,4 +1,4 @@
-# ROS1 -> ROS2 (mcap) Bag Conversion
+# ROS Bag Pipelines (`bagpipe`)
 
 ## Quick Start (Demo)
 
@@ -20,12 +20,19 @@ We provide a demo script that **automatically downloads test bagfiles** and runs
 bash ./scripts/install.sh
 
 # Basic conversion (Single File)
-convert_bag /path/to/single_ros1.bag
+bagpipe convert /path/to/single_ros1.bag
 
 # Series conversion (Folder Input)
-convert_bag /path/to/ros1_bag_folder --series
+bagpipe convert /path/to/ros1_bag_folder --series
+
+# What am I running, and is it current?
+bagpipe info
+bagpipe update
 
 ```
+
+> The command used to be `convert_bag`. That name still works as an alias, but
+> `bagpipe` is the one to use — it is not limited to conversion.
 
 This repository provides a containerized solution for two primary tasks:
 
@@ -56,25 +63,43 @@ The converter runs as an ephemeral container. It mounts the target data director
 
 ### Installation
 
-Run the provided installation script to create a symbolic link for the execution wrapper and pull the docker image.
+Run the provided installation script. It links the `bagpipe` command into
+`~/.local/bin`, installs shell completion, and pulls the docker image.
 
 ```bash
 ./scripts/install.sh
 
 ```
 
-**Note:** Ensure `~/.local/bin` is in your system `$PATH`.
+**Note:** Ensure `~/.local/bin` is in your system `$PATH`. The installer adds it
+to `~/.bashrc` if it is missing.
+
+### Commands
+
+`bagpipe` can be executed from any location. Tab completion covers the command
+names, the flags of each command, and `.bag` files and folders.
+
+| Command | Purpose |
+| --- | --- |
+| `bagpipe convert <input> [opts]` | Convert ROS 1 `.bag` files to ROS 2 `.mcap` |
+| `bagpipe plugins` | List available plugins and whether they are configured |
+| `bagpipe shell` | Open a shell in the container, in the current directory |
+| `bagpipe info` | Version, paths, image digest and update status |
+| `bagpipe update` | Pull the latest code **and** container image |
+| `bagpipe help` | Command list |
+
+`run <pipeline> <input>` and `inspect <bag>` are reserved for the general
+pipeline work described in the roadmap; they are recognized but not yet
+implemented.
 
 ### Usage
-
-The `convert_bag` command can be executed from any location.
 
 #### 1. Single File Conversion
 
 Converts a single `.bag` file. The output `.mcap` file is created in the same directory as the input.
 
 ```bash
-convert_bag /path/to/recording.bag
+bagpipe convert /path/to/recording.bag
 
 ```
 
@@ -86,9 +111,50 @@ Use the `--series` flag when processing split bag files (e.g., `_0.bag`, `_1.bag
 
 ```bash
 # Process all bags in a folder
-convert_bag /path/to/data_folder --series
+bagpipe convert /path/to/data_folder --series
 
 ```
+
+---
+
+### Staying up to date
+
+`bagpipe update` is the single update action. It matters that it is a single
+action, because the tool has two halves that must move together: the container
+image, and the Python code in `src/`, which is bind-mounted from this checkout
+at run time. Pulling only the image leaves you running old code.
+
+```bash
+bagpipe update      # git pull --ff-only + docker compose pull + relink
+```
+
+When your checkout falls behind `main`, invocations print a one-line notice:
+
+```
+! bagpipe is out of date (3 new commits are available on github/main).
+  update with: bagpipe update
+```
+
+The check is designed so that the invocation which pays the network cost is
+never the invocation that prints the warning:
+
+* The **foreground** work is reading one small cache file plus a `git rev-parse`
+  — around 5 ms, no network. For scale, the `docker compose run` round trip that
+  follows it is roughly 350 ms.
+* The **comparison against the remote** runs at most once every 24 h, in a
+  detached background job that nothing waits on. It writes a pre-rendered
+  message that a *later* invocation displays.
+* Being offline, or having an SSH key that needs a passphrase, is a silent
+  no-op — the background job uses `BatchMode` and a timeout, so it can never
+  hang or prompt.
+
+| Variable | Effect |
+| --- | --- |
+| `BAGPIPE_NO_UPDATE_CHECK=1` | Disable the notice entirely |
+| `BAGPIPE_CHECK_INTERVAL=<sec>` | Change the 24 h check interval |
+| `BAGPIPE_UPSTREAM=<remote>` | Compare against a specific git remote |
+| `BAGPIPE_IMAGE_TAG=<tag>` | Run a specific container image tag |
+| `BAGPIPE_DEBUG=1` | Print the computed mounts and container command |
 
 ---
 
@@ -165,7 +231,7 @@ class MyPlugin(BasePlugin):
 ```
 
 **3. Hot-Reloading**
-Because the `src` folder is mounted into the container, you do **not** need to rebuild the Docker image to test new plugins. Simply edit the Python file and run `convert_bag`.
+Because the `src` folder is mounted into the container, you do **not** need to rebuild the Docker image to test new plugins. Simply edit the Python file and run `bagpipe convert`. Use `bagpipe plugins` to confirm your class was discovered and picked up its YAML configuration.
 
 </details>
 
@@ -173,12 +239,41 @@ Because the `src` folder is mounted into the container, you do **not** need to r
 
 ### Advanced Configuration
 
-The script accepts optional arguments passed directly to the internal Python converter:
+`bagpipe convert` forwards every argument to the internal Python converter
+verbatim, so `bagpipe convert --help` is always the authoritative option list:
 
 * `--out-dir <path>`: Forces a specific output directory.
+* `--series`: Treats the input folder as a split sequence.
+* `--split-size <size>`: Splits output files by size (e.g. `3G`, `500M`).
 * `--with-plugins`: Enables the plugin system (reads `src/plugins.yaml`).
 * `--dry-run`: Validates input files, write permissions, and configuration without processing data.
 * `--skip-topics <topic1> <topic2> ...`: A list of topics to exclude from the conversion (blacklist).
+
+<details>
+<summary><strong>How paths reach the container</strong> (Click to Expand)</summary>
+
+Host paths are bind-mounted into the container **at their own path**, so a file
+at `/media/disk/rec.bag` on the host is at `/media/disk/rec.bag` inside the
+container too. Two things follow from that:
+
+1. **Arguments are never rewritten.** The wrapper passes `"$@"` through
+   untouched, so it does not need to know the converter's flag list — adding a
+   new flag to `src/convert.py` requires no wrapper change. (The previous
+   wrapper relativized every path against a single `/data` mount, which meant
+   hardcoding which flags take values.)
+2. **Reported paths are real.** The conversion summary prints host paths you can
+   copy and paste, rather than container-internal `/data/...` paths.
+
+The wrapper decides what to mount by taking the arguments that resolve to
+something existing on disk, mapping each to its nearest existing directory, and
+collapsing nested paths. An argument whose path has no existing component at all
+is not a path — this is what stops topic names like `/tf_static` from being
+treated as mount points. Mount targets that would shadow the container's own
+filesystem are refused rather than silently breaking the container.
+
+Run any command with `BAGPIPE_DEBUG=1` to see the computed mounts.
+
+</details>
 
 <details>
 <summary><strong>Feature: Auto-Generating ROS 2 Message Definitions</strong> (Click to Expand)</summary>
@@ -254,7 +349,9 @@ If your host supports X11 forwarding, you can run GUI tools (`rviz`) directly.
 
 ## Troubleshooting
 
-* **`convert_bag: command not found`**: Add `~/.local/bin` to your `$PATH`.
+* **`bagpipe: command not found`**: Add `~/.local/bin` to your `$PATH`, or re-run `./scripts/install.sh`.
+* **`refusing to mount <path>`**: the input or output path resolves to a directory that would shadow the container's own filesystem (e.g. `/usr/lib`, or a bare `/home`). Pass a more specific path.
+* **Tab completion not working**: it is installed to `~/.local/share/bash-completion/completions/`; start a new shell, and make sure the `bash-completion` package is installed.
 * **Changes to code not appearing**: The `src` folder is mounted. Changes apply immediately. If you add *system dependencies* (pip/apt), run `docker compose build converter`.
 * **Custom Messages not showing in Foxglove**: Ensure the plugin emits a standard type (e.g., `std_msgs/String`) or provides a valid definition override in the return tuple.
 
@@ -265,9 +362,22 @@ If your host supports X11 forwarding, you can run GUI tools (`rviz`) directly.
 
 ### Pending Improvements
 
+* **`bagpipe run <pipeline>`:** Named, configurable pipelines over bags, so
+  processing is not tied to the conversion step. The verb is reserved in the
+  dispatcher and the wrapper no longer rewrites arguments, so this needs only a
+  Python-side pipeline runner.
+* **`bagpipe inspect <bag>`:** Summarize topics, types, message counts and
+  duration without converting. Also reserved in the dispatcher.
 * **MCAP-to-MCAP Tooling:** Generalize the architecture to support MCAP-to-MCAP manipulation. This would allow using the plugin system (filtering, anonymization) on native ROS 2 data, not just during conversion.
 
 ### Completed
+
+* [x] **Unified CLI:** `bagpipe` with subcommands, tab completion, and
+  `convert_bag` kept as a compatibility alias.
+* [x] **Self-description and updates:** `bagpipe info` and `bagpipe update`,
+  plus a background-refreshed "out of date" notice.
+* [x] **Identity path mounts:** host paths mount at their own paths, removing
+  the argument-rewriting layer that was coupled to the converter's flag list.
 
 * [x] **Auto-splitting:** Series conversion with static TF injection is implemented.
 * [x] **Plugin System V2:** Parametric configuration, 1-to-N message expansion, and timestamp injection.
@@ -287,3 +397,11 @@ To update the system dependencies (Dockerfile):
 1. **Login:** `echo $GITHUB_TOKEN | docker login ghcr.io -u USER --password-stdin`
 2. **Build:** `./scripts/build-image.sh`
 3. **Push:** `./scripts/push-image.sh`
+
+Bump the `VERSION` file when the user-facing behavior of the tool changes; it is
+what `bagpipe info` and `bagpipe --version` report.
+
+The update notice compares the local checkout against the `main` branch of the
+git remote that the current branch tracks (`github` by default here). Pushing to
+that remote is what makes other users see the notice, so land wrapper changes
+there rather than only on a fork.

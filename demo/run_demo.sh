@@ -22,7 +22,8 @@ INPUT_SEQ="$INPUT_DIR/sequence"
 INPUT_PLUGIN="$INPUT_DIR/debayer"
 
 LAYOUT_FILE="foxglove_layout.json"
-CONVERTER_SCRIPT="../convert_bag.sh" 
+BAGPIPE="../bagpipe.sh"
+CONVERTER_SCRIPT="$BAGPIPE convert"
 
 # Google Drive IDs
 ID_BAG_0="1u-dvvvne-OXfz2YMDGVg2FBtSolf2pNk"
@@ -69,8 +70,8 @@ fi
 source .venv/bin/activate
 echo "[INFO] Virtual environment activated: $(which python3)"
 
-if [ ! -x "$CONVERTER_SCRIPT" ]; then
-    chmod +x "$CONVERTER_SCRIPT"
+if [ ! -x "$BAGPIPE" ]; then
+    chmod +x "$BAGPIPE"
 fi
 
 # ==============================================================================
