@@ -1,36 +1,23 @@
-FROM osrf/ros:noetic-desktop-full
+# Container fallback for bagpipe, used when uv is not available on the host.
+#
+# The image holds only the dependencies, installed from uv.lock. The code runs
+# from the checkout, which bagpipe mounts at its own path along with every other
+# non-system directory of the host -- so everything here lives under /usr/local,
+# where those mounts cannot cover it. Rebuild when uv.lock changes.
+FROM python:3.12-slim
 
-# 1. Install basics
-RUN apt-get update && apt-get install -y \
-    python3-catkin-tools \
-    python3-pip \
-    git \
-    nano \
-    vim \
-    bash-completion \
-    sudo \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:0.12.21 /uv /usr/local/bin/uv
 
-# 2. Install conversion libs
-RUN pip3 install rosbags mcap-ros2-support zstandard tqdm
+ENV UV_PROJECT_ENVIRONMENT=/usr/local/bagpipe-env \
+    UV_PYTHON_PREFERENCE=only-system \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_NO_CACHE=1
 
-# 3. Create user
-ARG USERNAME=dev
-ARG USER_UID=1000
-ARG USER_GID=1000
+WORKDIR /usr/local/src/bagpipe
+COPY pyproject.toml uv.lock VERSION README.md ./
+RUN uv sync --locked --no-install-project \
+    && rm -rf /usr/local/src/bagpipe
 
-RUN groupadd --gid $USER_GID $USERNAME \
-    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
-    && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
-    && chmod 0440 /etc/sudoers.d/$USERNAME
-
-# 4. Environment setup
-RUN echo "source /opt/ros/noetic/setup.bash" >> /home/$USERNAME/.bashrc
-RUN echo "source /home/$USERNAME/catkin_ws/devel/setup.bash" >> /home/$USERNAME/.bashrc
-
-# This ensures the script is always available inside the container at a known path.
-COPY --chown=$USERNAME:$USERNAME src/ /home/$USERNAME/src/
-
-# 5. Entrypoint
-USER $USERNAME
-WORKDIR /home/$USERNAME/catkin_ws
+ENV PATH=/usr/local/bagpipe-env/bin:$PATH
+WORKDIR /
+CMD ["python", "-m", "bagpipe", "--help"]

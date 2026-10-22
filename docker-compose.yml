@@ -1,32 +1,10 @@
 services:
-  ros_dev:
-    build: .
-    container_name: ros_pet_container
-    restart: unless-stopped
-    network_mode: host
-    privileged: true
-    environment:
-      - DISPLAY=${DISPLAY}
-      - QT_X11_NO_MITSHM=1
-      - TERM=xterm-256color
-      - DISABLE_ROS1_EOL_WARNINGS=1
-    volumes:
-      - ~/repos:/home/dev/repos
-      - ./catkin_ws:/home/dev/catkin_ws
-      - ~/bag:/home/dev/bags
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ./demo:/home/dev/demo
-      - /media:/media:rw
-    command: tail -f /dev/null
-
   # Container fallback for bagpipe, used when uv is not installed (see
   # lib/common.sh). The image holds only the locked dependencies; the code runs
   # from this checkout. Host directories are mounted per invocation.
   bagpipe:
     image: ghcr.io/comrob/bagpipe:${BAGPIPE_IMAGE_TAG:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile.bagpipe
+    build: .
     init: true
     restart: "no"
     user: "${CURRENT_UID:-1000}:${CURRENT_GID:-1000}"

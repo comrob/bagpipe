@@ -34,9 +34,7 @@ bagpipe update
 > The command used to be `convert_bag`. That name still works as an alias, but
 > `bagpipe` is the one to use — it is not limited to conversion.
 
-This repository provides a containerized solution for two primary tasks:
-
-1. **ROSbags Conversion:** A utility to convert ROS 1 (`.bag`) files to ROS 2 (`.mcap`) format. Features include:
+`bagpipe` converts ROS 1 (`.bag`) files to ROS 2 (`.mcap`) and extracts selected topics from large `.mcap` recordings. Conversion features:
 
 * **Plugin System:** Extendable architecture to modify data on the fly, inject timestamps, or split topics using Python plugins.
 * **Automatic Type Repair:** Migrates custom messages without source code. Automatically fixes ROS1 vs ROS2 incompatibilities.
@@ -45,8 +43,6 @@ This repository provides a containerized solution for two primary tasks:
 * **Crash-Safe:** Implements graceful signal handling. Hit `Ctrl+C` anytime, and your MCAP file will still be valid and playable.
 * **Resumable:** Re-running an interrupted conversion continues from where it stopped instead of starting over.
 * **No ROS Required:** No need to install ROS 1/2 or build custom message packages. Dependencies come from a lock file, natively through `uv` or in a container.
-
-2. **ROS Noetic Development:** A persistent environment for developing, building, and executing ROS 1 (Noetic) packages.
 
 ## Prerequisites
 
@@ -60,12 +56,10 @@ One of:
   The current user must be able to run Docker commands (e.g. be in the `docker` group;
   see https://docs.docker.com/engine/install/linux-postinstall).
 
-The ROS 1 development environment (Part 2) always uses Docker.
-
 
 ---
 
-## Part 1: Bag Converter
+## Using bagpipe
 
 The commands run natively when `uv` is installed, and in a container otherwise
 (see *Runtimes* below). Either way, paths are used exactly as on the host.
@@ -335,7 +329,7 @@ command's flags.
   arguments, paths inside YAML configs, output folders the converter picks
   itself, and symlinks between disks.
 * **Container (fallback).** The image `ghcr.io/comrob/bagpipe` holds only the
-  locked dependencies (`Dockerfile.bagpipe`); the code runs from this checkout.
+  locked dependencies (`Dockerfile`); the code runs from this checkout.
   Every non-system directory at the top of `/` (`/home`, `/media`, `/mnt`,
   network shares, ...) is mounted at its own path, so the
   container sees the same paths as the host.
@@ -380,40 +374,6 @@ ros2 interface list | grep <YourCustomMessage>
 
 ---
 
-<details>
-<summary><strong>Part 2: ROS 1 Development Environment</strong> (Click to Expand)</summary>
-
-The `ros_dev` service provides a full ROS Noetic desktop environment with GUI support.
-
-### Configuration
-
-Map your host directories to the container by editing `docker-compose.yml`:
-
-| Host Path | Container Path | Description |
-| --- | --- | --- |
-| `~/repos` | `/home/dev/repos` | Source code repositories. |
-| `./catkin_ws` | `/home/dev/catkin_ws` | The active Catkin workspace. |
-
-### Workflow
-
-1. **Start the Service:**
-
-```bash
-docker compose up -d ros_dev
-
-```
-
-2. **Access the Shell:**
-
-```bash
-docker exec -it ros_pet_container bash
-
-```
-
-3. **GUI Visualization:**
-If your host supports X11 forwarding, you can run GUI tools (`rviz`) directly.
-
-</details>
 
 ---
 
@@ -422,7 +382,7 @@ If your host supports X11 forwarding, you can run GUI tools (`rviz`) directly.
 ```
 bagpipe.sh, lib/            host-side wrapper: commands, runtime choice, updates
 pyproject.toml, uv.lock     dependencies (declared / locked)
-Dockerfile.bagpipe          container fallback: the locked dependencies only
+Dockerfile                  container fallback: the locked dependencies only
 src/bagpipe/                Python package, run as `python -m bagpipe <command>`
   cli.py                    command dispatch (commands import lazily)
   mcap_io/                  shared by convert and extract
@@ -493,10 +453,8 @@ Dependencies are declared in `pyproject.toml` and pinned in `uv.lock`:
 2. **Container fallback:** rebuild and push the dependency image whenever
    `uv.lock` changes:
    * **Login:** `echo $GITHUB_TOKEN | docker login ghcr.io -u USER --password-stdin`
-   * **Build:** `./scripts/build-image.sh` (builds `Dockerfile.bagpipe` as `ghcr.io/comrob/bagpipe`)
+   * **Build:** `./scripts/build-image.sh` (builds `Dockerfile` as `ghcr.io/comrob/bagpipe`)
    * **Push:** `./scripts/push-image.sh`
-
-`Dockerfile` (ROS Noetic) is only for the ROS 1 development environment, Part 2.
 
 Bump the `VERSION` file when the user-facing behavior of the tool changes; it is
 what `bagpipe info` and `bagpipe --version` report.
