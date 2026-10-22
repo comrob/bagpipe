@@ -1,0 +1,86 @@
+# Example `bagpipe extract` config. Copy it to a new name in this folder and
+# fill in your paths; configs other than *.example.yaml are git-ignored, so
+# your paths stay on your machine.
+#
+#   cp configs/extract/extract.example.yaml configs/extract/my_extract.yaml
+#   bagpipe extract configs/extract/my_extract.yaml
+#
+# Re-running continues an interrupted extraction. Topics already present in
+# the `reuse` files are read from local disk instead of the source.
+
+# The recording to extract from: an uncompressed, indexed .mcap (rosbag2 default).
+source: /path/to/recording_0.mcap
+# The new zstd-compressed .mcap.
+output: /path/to/extracts/recording_sensors.mcap
+
+# start: 0          # seconds from the start of the recording
+# duration: 530     # seconds; omit for the whole recording
+
+# Earlier extracts of the same recording (optional). Each topic is read from
+# them over the time range they cover, and from `source` for the rest.
+reuse:
+  - /path/to/extracts/recording_subset.mcap
+
+# A flat list, or groups of lists as below (group names are just labels).
+topics:
+  os2_lidar:
+    - /os2/points
+    - /os2/imu
+    - /os2/metadata
+    - /os2/telemetry
+  dome_lidar:
+    - /os_dome/points
+    - /os_dome/imu
+    - /os_dome/metadata
+    - /os_dome/telemetry
+  front_camera:
+    - /front/camera/image_raw/compressed
+    - /front/camera/camera_info
+  thermal_camera:
+    - /flir_boson/image_raw
+    - /flir_boson/camera_info
+  plantpix:
+    - /plantpix/rgb
+    - /plantpix/nir
+    - /plantpix/ndvi
+    - /plantpix/ndvi2
+  imu:
+    - /imu/data_raw
+    - /imu/data
+    - /imu/mag
+    - /imu/time_ref
+    - /imu/utctime
+    - /temperature
+  gnss:
+    - /gnss/septentrio/fix
+    - /gnss/septentrio/raw/fix
+    - /gnss/septentrio/raw/pose
+    - /gnss/septentrio/raw/twist_gnss
+    - /gnss/septentrio/azimuth_imu
+    - /gnss/septentrio/gpst
+    - /gnss/septentrio/raw/gpst
+  robot:
+    - /taros/wheels
+    - /taros/power
+    - /taros/status
+    - /taros/raw/rx
+  tf:
+    - /tf_static
+    - /tf
+  odometry:
+    - /taros/wheel_odometry
+    - /taros/ekf_odom
+    - /odometry/imu
+    - /odometry/imu_incremental
+  lili:
+    - /lili/mapping/odometry
+    - /lili/mapping/odometry_incremental
+    - /lili/mapping/baselink_odometry
+    - /lili/mapping/baselink_odometry_incremental
+    - /lili/mapping/gps_odom
+    - /lili/mapping/baselink_gps_enu_odometry
+    - /lili/mapping/baselink_gps_ned_odometry
+    - /lili/mapping/lidar_gps_enu_pose
+    - /lili/mapping/lidar_gps_ned_pose
+    - /lili/mapping/lidar_gps_fix
+    - /lili/enu_to_local_offset

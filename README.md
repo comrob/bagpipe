@@ -129,7 +129,9 @@ bagpipe convert /path/to/data_folder --series
 `.mcap`. It reads only the bytes of the selected messages, so the cost is the
 size of what you keep, not the size of the recording.
 
-Extractions are described by a YAML config in `configs/extract/`:
+Extractions are described by a YAML config in `configs/extract/`. Start from
+`configs/extract/extract.example.yaml`; your own configs there are git-ignored,
+so local paths never end up in the repository:
 
 ```yaml
 source: /path/to/recording_0.mcap
