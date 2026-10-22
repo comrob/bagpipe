@@ -3,7 +3,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
-from mcap.writer import Writer as McapWriter
+from mcap.writer import ChunkBuilder, Writer as McapWriter
 
 from .partial import PartialMcap, scan_partial_mcap, restore_index
 
@@ -18,11 +18,49 @@ def parse_size(size_str: Optional[str]) -> int:
         return int(val) * units.get(unit, 1)
     raise ValueError(f"Invalid size format: {size_str}")
 
+class TopicChunkedWriter(McapWriter):
+    """
+    An MCAP writer that keeps one open chunk per channel instead of one shared
+    chunk, so every chunk holds a single topic. A reader after a few topics
+    then decompresses only their chunks, and data of one kind is compressed
+    together. The file is standard MCAP: indexed readers merge the overlapping
+    chunks by log time. Schema and channel records go into the data section
+    ahead of the chunks, so a file cut short still describes every channel.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._builders: Dict[int, ChunkBuilder] = {}
+        # Without a current chunk, the base class writes schema and channel
+        # records straight into the data section
+        self._Writer__chunk_builder = None
+
+    def add_message(self, channel_id, log_time, data, publish_time, sequence=0):
+        builder = self._builders.get(channel_id)
+        if builder is None:
+            builder = self._builders[channel_id] = ChunkBuilder()
+        # The base class writes into whichever builder is current
+        self._Writer__chunk_builder = builder
+        super().add_message(channel_id=channel_id, log_time=log_time, data=data,
+                            publish_time=publish_time, sequence=sequence)
+        self._Writer__chunk_builder = None
+
+    def finish(self):
+        for cid in sorted(self._builders):
+            self._Writer__chunk_builder = self._builders[cid]
+            self._Writer__finalize_chunk()
+        self._Writer__chunk_builder = None
+        super().finish()
+
+
 class RollingMcapWriter:
-    def __init__(self, base_path: Path, split_size: int, profile: str, resume: bool = False):
+    def __init__(self, base_path: Path, split_size: int, profile: str, resume: bool = False,
+                 topic_chunks: bool = False):
         self.base_path = base_path
         self.split_size = split_size
         self.profile = profile
+        # One chunk stream per topic (TopicChunkedWriter) instead of mixed chunks
+        self.writer_class = TopicChunkedWriter if topic_chunks else McapWriter
         self.part_num = 0
 
         # Track all generated file segments for final renaming
@@ -82,7 +120,7 @@ class RollingMcapWriter:
         self.generated_segments.append(self.current_file_path)
 
         self._f = open(self.current_file_path, "wb")
-        self.writer = McapWriter(self._f)
+        self.writer = self.writer_class(self._f)
         self.writer.start(profile=self.profile)
 
         self._register_known()
@@ -153,7 +191,7 @@ class RollingMcapWriter:
                 self.channels.setdefault(cid, (channel.topic, channel.message_encoding, channel.schema_id, channel.metadata))
 
         self._f = open(last.path, "r+b")
-        self.writer = McapWriter(self._f)
+        self.writer = self.writer_class(self._f)
         # Buffered into the next chunk; repeating identical records under the same ids is valid MCAP
         self._register_known()
         restore_index(self.writer, last)
@@ -181,6 +219,16 @@ class RollingMcapWriter:
                 for cid, n in s.end_time_counts.items():
                     written[self.channels[cid][0]] += n
         return end_time, written
+
+    def resumed_counts(self) -> Dict[str, Tuple[int, int]]:
+        """Per topic: messages already written, and the log time of the last one."""
+        counts = {}
+        for s in self.resumed:
+            for cid, n in s.channel_message_counts.items():
+                topic = self.channels[cid][0]
+                prev_n, prev_t = counts.get(topic, (0, 0))
+                counts[topic] = (prev_n + n, max(prev_t, s.channel_end_times[cid]))
+        return counts
 
     def resumed_stats(self) -> List[Dict]:
         """Per-segment stats of the data kept from the interrupted run."""

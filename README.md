@@ -124,10 +124,11 @@ bagpipe convert /path/to/data_folder --series
 
 ### Extracting topics from large MCAP recordings
 
-`bagpipe extract` copies selected topics out of a large, uncompressed, indexed
-`.mcap` (e.g. a ROS 2 recording on a network share) into a new zstd-compressed
-`.mcap`. It reads only the bytes of the selected messages, so the cost is the
-size of what you keep, not the size of the recording.
+`bagpipe extract` copies selected topics out of a large indexed `.mcap` (e.g. a
+ROS 2 recording on a network share) into a new zstd-compressed `.mcap`. From an
+uncompressed source (the `rosbag2` default) it reads only the bytes of the
+selected messages, so the cost is the size of what you keep, not the size of
+the recording.
 
 Extractions are described by a YAML config in `configs/extract/`. Start from
 `configs/extract/extract.example.yaml`; your own configs there are git-ignored,
@@ -154,15 +155,25 @@ Paths written inside the config are mounted into the container just like
 paths given on the command line.
 
 * **Resumable:** output is written to `OUT.mcap.part` (Ctrl+C leaves a valid
-  `OUT.mcap.incomplete`). Re-running the same command continues after the last
-  intact chunk. The read plan is cached as `OUT.mcap.plan.npz`.
+  `OUT.mcap.incomplete`). Re-running the same command keeps every intact chunk
+  and continues each topic after its last written message. The read plan is
+  cached as `OUT.mcap.plan.npz`.
 * **Reuse:** topics found in the `reuse` files are read from local disk instead
   of the source, over whatever time range each file covers (complete extracts,
   shorter slices, or `.incomplete` files). Every reused message is checked
   against the source index, and the output is identical -- message for
   message, in the same order -- to a plain extraction.
 
-The source must be an uncompressed, indexed MCAP (the `rosbag2` default).
+The output keeps **one chunk stream per topic** instead of chunks that mix all
+topics. It is still standard MCAP (tested with `ros2 bag info`, `ros2 bag
+play` and rosbag2's reader on Jazzy), and a later extraction from it reads only
+the chunks of the topics it asks for.
+
+Compressed sources (zstd or lz4 chunks) work too. A compressed chunk can only
+be read whole, so from a recording whose chunks mix all topics, even a few
+small topics usually mean reading most of the file; the plan step warns with
+the amount before copying starts. Extracts made by bagpipe don't have that
+problem: picking `/tf` and `/imu/data` out of a 561 MB extract reads 0.2 MB.
 
 ### Staying up to date
 

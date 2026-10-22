@@ -1,6 +1,10 @@
 """
-Copy selected topics out of a huge, uncompressed, indexed MCAP into a new
-zstd-compressed MCAP, reading only the bytes of the selected messages.
+Copy selected topics out of a huge indexed MCAP into a new zstd-compressed
+MCAP. From an uncompressed source only the bytes of the selected messages are
+read; from a compressed one, every chunk that holds a selected message.
+
+The output keeps one chunk stream per topic (TopicChunkedWriter), so a later
+extraction from it reads only the chunks of the topics it asks for.
 
     bagpipe extract SRC.mcap OUT.mcap --topics /tf /tf_static ...
     bagpipe extract SRC.mcap OUT.mcap --topics ... --start 600 --duration 30   # a sample
@@ -9,10 +13,17 @@ zstd-compressed MCAP, reading only the bytes of the selected messages.
 
 How it works:
   1. Plan: read each chunk's message index (a few KB per chunk) and list every
-     selected message as (log_time, file offset, length). Cached next to the
+     selected message as (log_time, chunk, offset, length). Cached next to the
      output as OUT.mcap.plan.npz, so a restart does not redo it.
   2. Copy: walk the plan in log-time order, fetch messages in batches with
      parallel coalesced reads, and write them through RollingMcapWriter.
+     Compressed chunks are read whole and decompressed in parallel.
+
+Compressed sources: a compressed chunk is read whole. In a recording, a chunk
+mixes all topics recorded in its time span, so even a few small topics usually
+touch most chunks and most of the file is transferred; extracts made by this
+tool keep topics in separate chunks and do not have that problem. The plan step
+prints how much is read before copying starts.
 
 Reuse (--reuse OLD.mcap ...): for each topic, an earlier extract of the same
 recording is used over the time range it covers -- after checking that its
@@ -21,8 +32,9 @@ from SRC. Messages are written in the same order as a plain extraction
 (log time, then position in SRC), so the result is identical either way.
 
 Interruptions: output is written to OUT.mcap.part (Ctrl+C leaves a valid
-OUT.mcap.incomplete). Re-running the same command continues after the last
-intact chunk, using the same resume logic as `bagpipe convert`.
+OUT.mcap.incomplete). Re-running the same command keeps every intact chunk and,
+per topic, continues after the messages already written (topics are written
+in plan order, so those are always the topic's first messages in the plan).
 """
 import argparse
 import os
@@ -35,8 +47,8 @@ from pathlib import Path
 import numpy as np
 from mcap.reader import make_reader
 
-from ..mcap_io.index import build_plan
-from ..mcap_io.sources import LocalSource, remote_messages
+from ..mcap_io.index import build_plan, chunk_table, PLAN_DTYPE
+from ..mcap_io.sources import LocalSource, read_sizes, remote_messages
 from ..mcap_io.writer import RollingMcapWriter
 from .config import apply_config
 from .reuse import assign_reuse
@@ -82,6 +94,7 @@ def main(argv=None):
         sys.exit(f"[ERR] topics not in source: {missing}")
     wanted = {by_topic[t] for t in args.topics}
 
+    chunks = chunk_table(summary)
     st = summary.statistics
     start_ns = st.message_start_time + int(args.start * 1e9)
     end_ns = st.message_end_time if args.duration is None else start_ns + int(args.duration * 1e9)
@@ -91,18 +104,19 @@ def main(argv=None):
     plan = None
     if plan_path.exists():
         cached = np.load(plan_path)
-        if np.array_equal(cached["key"], key):
+        if np.array_equal(cached["key"], key) and cached["plan"].dtype == PLAN_DTYPE:
             plan = cached["plan"]
             print(f"[PLAN] using cached plan {plan_path.name}")
     if plan is None:
-        plan = build_plan(fd, summary.chunk_indexes, wanted, start_ns, end_ns, args.threads)
+        plan = build_plan(fd, chunks, wanted, start_ns, end_ns, args.threads)
         np.savez(plan_path, plan=plan, key=key)
     topic_of = {cid: summary.channels[cid].topic for cid in wanted}
     source = assign_reuse(args.reuse, summary, wanted, plan, start_ns, end_ns)
-    remote_total = int(plan["length"][source == 0].sum())
+    remote_total = int(read_sizes(plan[source == 0], chunks).sum())
     print(f"[PLAN] {len(plan)} messages, {(source > 0).sum()} reused, {remote_total / 1e9:.1f} GB to read from source")
+    warn_compressed(plan[source == 0], chunks, wanted, remote_total, args.src)
 
-    writer = RollingMcapWriter(args.out, 0, "ros2", resume=True)
+    writer = RollingMcapWriter(args.out, 0, "ros2", resume=True, topic_chunks=True)
 
     # Schemas and channels in source id order; identical ones are reused on resume
     out_cid = {}
@@ -113,38 +127,42 @@ def main(argv=None):
         out_cid[cid] = writer.register_channel(topic=ch.topic, message_encoding=ch.message_encoding,
                                                schema_id=sid, metadata=dict(ch.metadata))
 
-    # Skip what an interrupted run already wrote: everything before its last
-    # timestamp, plus per topic the messages it wrote at exactly that timestamp
+    # Skip what an interrupted run already wrote: per topic, its first messages
+    # in the plan (with topic chunks, each topic stopped at a different time)
     resume_time = start_ns
     if writer.resumed:
-        resume_time, written = writer.resume_point()
-        keep = plan["log_time"] >= resume_time
-        for i in np.flatnonzero(plan["log_time"] == resume_time):
-            topic = topic_of[int(plan["channel"][i])]
-            if written[topic] > 0:
-                written[topic] -= 1
-                keep[i] = False
+        keep = np.ones(len(plan), dtype=bool)
+        for topic, (n, last_time) in writer.resumed_counts().items():
+            idx = np.flatnonzero(plan["channel"] == by_topic.get(topic, -1))
+            if by_topic.get(topic) not in wanted or n > len(idx) or plan["log_time"][idx[n - 1]] != last_time:
+                sys.exit(f"[ERR] {writer.current_file_path.name} was written with other settings ({topic} does not "
+                         f"match the plan); use the original source, topics and time range, or remove it")
+            keep[idx[:n]] = False
+        print(f"[INFO] Continuing: {len(plan) - keep.sum()} of {len(plan)} messages already written, ", end="")
         plan, source = plan[keep], source[keep]
-        print(f"[INFO] Resuming at {(resume_time - start_ns) / 1e9:.0f}s of {(end_ns - start_ns) / 1e9:.0f}s, "
-              f"{plan['length'][source == 0].sum() / 1e9:.1f} GB left to read from source")
+        resume_time = int(plan["log_time"].min()) if len(plan) else end_ns
+        remote_total = int(read_sizes(plan[source == 0], chunks).sum())
+        print(f"{remote_total / 1e9:.1f} GB left to read from source")
 
     t0, last_print = time.time(), 0.0
     remote_read = reused = 0
     span = max(end_ns - start_ns, 1)
     frac0 = (resume_time - start_ns) / span
     with ThreadPoolExecutor(args.threads) as pool:
-        remote = remote_messages(fd, plan[source == 0], args.batch_mb << 20, pool)
+        remote = remote_messages(fd, plan[source == 0], chunks, args.batch_mb << 20, pool)
+        cost = np.zeros(len(plan), dtype=np.int64)
+        cost[source == 0] = read_sizes(plan[source == 0], chunks)
         local = {k: LocalSource(path, sorted({topic_of[int(c)] for c in plan["channel"][source == k]}), resume_time, end_ns)
                  for k, path in enumerate(args.reuse, 1) if (source == k).any()}
         # Same order as a plain extraction: the plan is sorted by (log time, position in SRC)
-        for rec, k in zip(plan, source):
+        for rec, k, n in zip(plan, source, cost):
             if stop["requested"]:
                 remote.close()  # finish in-flight reads while the pool is still open
                 break
             cid, log_time = int(rec["channel"]), int(rec["log_time"])
             if k == 0:
                 t, seq, pub_time, data = next(remote)
-                remote_read += int(rec["length"])
+                remote_read += int(n)
             else:
                 t, seq, pub_time, data = local[k].take(topic_of[cid], log_time)
                 reused += 1
@@ -164,6 +182,27 @@ def main(argv=None):
         plan_path.unlink(missing_ok=True)
     sys.exit(0 if not stop["requested"] else 130)
 
+
+def warn_compressed(plan: np.ndarray, chunks: list, wanted: set, to_read: int, src: Path):
+    """Explains why a compressed source costs more to read than the selected messages."""
+    used = [chunks[c] for c in np.unique(plan["chunk"]).tolist() if chunks[c].compression]
+    if not used:
+        return
+    kinds = "/".join(sorted({ci.compression for ci in used}))
+    selected = int(plan["length"].sum())
+    size = src.stat().st_size
+    def human(n):
+        return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.1f} MB"
+    amount = (f"{human(to_read)} of the {human(size)} file ({100 * to_read / max(size, 1):.0f}%) is read "
+              f"for {human(selected)} of selected messages (uncompressed)")
+    if not any(ci.message_index_offsets.keys() - wanted for ci in used):
+        print(f"[INFO] The source is {kinds}-compressed with the selected topics in chunks of their own: {amount}.")
+        return
+    print(f"[WARN] The source is {kinds}-compressed and its chunks mix topics: {amount}.\n"
+          f"       A compressed chunk can only be read whole, so every chunk holding a selected message is\n"
+          f"       transferred, including the other topics in it. Selecting topics saves much less than with\n"
+          f"       an uncompressed source, or with a source that keeps topics in separate chunks (as extracts\n"
+          f"       made by bagpipe do).", flush=True)
 
 if __name__ == "__main__":
     main()

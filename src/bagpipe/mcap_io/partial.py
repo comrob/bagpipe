@@ -29,6 +29,8 @@ class PartialMcap:
     end_time: Optional[int] = None
     # channel_id -> messages logged exactly at end_time
     end_time_counts: Counter = field(default_factory=Counter)
+    # channel_id -> log time of its last message
+    channel_end_times: Dict[int, int] = field(default_factory=dict)
 
     @property
     def message_count(self) -> int:
@@ -38,9 +40,10 @@ def scan_partial_mcap(path: Path) -> PartialMcap:
     """
     Walks the data section of an MCAP that may be cut off at any byte.
 
-    Our writer emits the data section as groups of [Chunk, MessageIndex...]. A
-    group is kept only when the chunk passes its CRC and all of its message
-    indexes were read, so the file can be truncated at keep_bytes and appended to.
+    Our writers emit the data section as groups of [Chunk, MessageIndex...],
+    possibly with Schema and Channel records between them. A group is kept only
+    when the chunk passes its CRC and all of its message indexes were read, so
+    the file can be truncated at keep_bytes and appended to.
     """
     partial = PartialMcap(path)
     with open(path, "rb") as f:
@@ -73,6 +76,16 @@ def scan_partial_mcap(path: Path) -> PartialMcap:
                 continue
             if group is not None:
                 break  # a chunk whose message indexes were never written
+            if opcode == Opcode.SCHEMA:  # outside chunks, as TopicChunkedWriter writes them
+                schema = Schema.read(stream)
+                partial.schemas[schema.id] = schema
+                partial.keep_bytes = f.tell()
+                continue
+            if opcode == Opcode.CHANNEL:
+                channel = Channel.read(stream)
+                partial.channels[channel.id] = channel
+                partial.keep_bytes = f.tell()
+                continue
             if opcode == Opcode.HEADER:
                 partial.keep_bytes = f.tell()
                 continue
@@ -121,6 +134,9 @@ def _commit_group(partial: PartialMcap, chunk: Chunk, chunk_index: ChunkIndex, r
 
     for index in indexes:
         partial.channel_message_counts[index.channel_id] += len(index.records)
+        if index.records:
+            last = max(t for t, _ in index.records)
+            partial.channel_end_times[index.channel_id] = max(partial.channel_end_times.get(index.channel_id, last), last)
         if chunk.message_end_time == partial.end_time:
             partial.end_time_counts[index.channel_id] += sum(1 for t, _ in index.records if t == partial.end_time)
 
