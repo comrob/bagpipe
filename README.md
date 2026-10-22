@@ -44,28 +44,37 @@ This repository provides a containerized solution for two primary tasks:
 * **Split-Bag Handling:** Automatically detects split bags and injects `/tf_static` into every chunk. Every output file is self-contained.
 * **Crash-Safe:** Implements graceful signal handling. Hit `Ctrl+C` anytime, and your MCAP file will still be valid and playable.
 * **Resumable:** Re-running an interrupted conversion continues from where it stopped instead of starting over.
-* **Zero Dependencies:** Dockerized solution. No need to install ROS 1 or build custom message packages locally.
+* **No ROS Required:** No need to install ROS 1/2 or build custom message packages. Dependencies come from a lock file, natively through `uv` or in a container.
 
 2. **ROS Noetic Development:** A persistent environment for developing, building, and executing ROS 1 (Noetic) packages.
 
 ## Prerequisites
 
-* **Docker:** Ensure Docker and Docker Compose are installed.
-  * basic installaiton: https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository
-* **Permissions:** The current user must have permission to run Docker commands (e.g., be in the `docker` group).
-  * post-installation steps: https://docs.docker.com/engine/install/linux-postinstall
+One of:
+
+* **uv (recommended):** `curl -LsSf https://astral.sh/uv/install.sh | sh` -- no root needed.
+  bagpipe then runs natively: `uv` installs its own Python 3.12 and the locked
+  dependencies (`uv.lock`) into `.venv` of this checkout, independent of the
+  system Python. Works on Ubuntu 20.04 and newer, x86_64 and ARM64.
+* **Docker** with Docker Compose, as a fallback when `uv` is not available.
+  The current user must be able to run Docker commands (e.g. be in the `docker` group;
+  see https://docs.docker.com/engine/install/linux-postinstall).
+
+The ROS 1 development environment (Part 2) always uses Docker.
 
 
 ---
 
 ## Part 1: Bag Converter
 
-The converter runs as an ephemeral container. It mounts the target data directory, processes the files, and terminates.
+The commands run natively when `uv` is installed, and in a container otherwise
+(see *Runtimes* below). Either way, paths are used exactly as on the host.
 
 ### Installation
 
 Run the provided installation script. It links the `bagpipe` command into
-`~/.local/bin`, installs shell completion, and pulls the docker image.
+`~/.local/bin`, installs shell completion, and sets up the Python environment
+(or pulls the container image when `uv` is not installed).
 
 ```bash
 ./scripts/install.sh
@@ -167,7 +176,7 @@ image, and the Python code in `src/`, which is bind-mounted from this checkout
 at run time. Pulling only the image leaves you running old code.
 
 ```bash
-bagpipe update      # git pull --ff-only + docker compose pull + relink
+bagpipe update      # git pull --ff-only + uv sync (or image pull) + relink
 ```
 
 When your checkout falls behind `main`, invocations print a one-line notice:
@@ -181,8 +190,8 @@ The check is designed so that the invocation which pays the network cost is
 never the invocation that prints the warning:
 
 * The **foreground** work is reading one small cache file plus a `git rev-parse`
-  — around 5 ms, no network. For scale, the `docker compose run` round trip that
-  follows it is roughly 350 ms.
+  — around 5 ms, no network. For scale, starting a command takes roughly 250 ms
+  natively (about 100 ms of it is `uv` confirming the environment is current).
 * The **comparison against the remote** runs at most once every 24 h, in a
   detached background job that nothing waits on. It writes a pre-rendered
   message that a *later* invocation displays.
@@ -273,7 +282,7 @@ class MyPlugin(BasePlugin):
 ```
 
 **3. Hot-Reloading**
-Because the `src` folder is mounted into the container, you do **not** need to rebuild the Docker image to test new plugins. Simply edit the Python file and run `bagpipe convert`. Use `bagpipe plugins` to confirm your class was discovered and picked up its YAML configuration.
+Because the code runs from the checkout, you do **not** need to rebuild or reinstall anything to test new plugins. Simply edit the Python file and run `bagpipe convert`. Use `bagpipe plugins` to confirm your class was discovered and picked up its YAML configuration.
 
 </details>
 
@@ -314,28 +323,25 @@ way. In `--series` mode only the interrupted bag is resumed; the bags before it
 are converted again.
 
 <details>
-<summary><strong>How paths reach the container</strong> (Click to Expand)</summary>
+<summary><strong>Runtimes: native (uv) and container</strong> (Click to Expand)</summary>
 
-Host paths are bind-mounted into the container **at their own path**, so a file
-at `/media/disk/rec.bag` on the host is at `/media/disk/rec.bag` inside the
-container too. Two things follow from that:
+`bagpipe convert` and `bagpipe extract` run `python -m bagpipe <command>`, with
+the arguments passed through untouched -- the wrapper does not need to know any
+command's flags.
 
-1. **Arguments are never rewritten.** The wrapper passes `"$@"` through
-   untouched, so it does not need to know the converter's flag list — adding a
-   new flag to `src/bagpipe/convert/converter.py` requires no wrapper change. (The previous
-   wrapper relativized every path against a single `/data` mount, which meant
-   hardcoding which flags take values.)
-2. **Reported paths are real.** The conversion summary prints host paths you can
-   copy and paste, rather than container-internal `/data/...` paths.
+* **Native (default when `uv` is installed).** The first run creates `.venv` in
+  the checkout from `uv.lock` (a few seconds); later runs only check that it is
+  current. The process sees the host filesystem directly, so every path works:
+  arguments, paths inside YAML configs, output folders the converter picks
+  itself, and symlinks between disks.
+* **Container (fallback).** The image `ghcr.io/comrob/bagpipe` holds only the
+  locked dependencies (`Dockerfile.bagpipe`); the code runs from this checkout.
+  Every non-system directory at the top of `/` (`/home`, `/media`, `/mnt`,
+  network shares, ...) is mounted at its own path, so the
+  container sees the same paths as the host.
 
-The wrapper decides what to mount by taking the arguments that resolve to
-something existing on disk, mapping each to its nearest existing directory, and
-collapsing nested paths. An argument whose path has no existing component at all
-is not a path — this is what stops topic names like `/tf_static` from being
-treated as mount points. Mount targets that would shadow the container's own
-filesystem are refused rather than silently breaking the container.
-
-Run any command with `BAGPIPE_DEBUG=1` to see the computed mounts.
+Choose explicitly with `BAGPIPE_RUNTIME=native|docker` (default `auto`). Run any
+command with `BAGPIPE_DEBUG=1` to see what is executed.
 
 </details>
 
@@ -414,7 +420,9 @@ If your host supports X11 forwarding, you can run GUI tools (`rviz`) directly.
 ## Code Layout
 
 ```
-bagpipe.sh, lib/            host-side wrapper: commands, mounts, updates
+bagpipe.sh, lib/            host-side wrapper: commands, runtime choice, updates
+pyproject.toml, uv.lock     dependencies (declared / locked)
+Dockerfile.bagpipe          container fallback: the locked dependencies only
 src/bagpipe/                Python package, run as `python -m bagpipe <command>`
   cli.py                    command dispatch (commands import lazily)
   mcap_io/                  shared by convert and extract
@@ -428,17 +436,17 @@ src/plugins/, plugins.yaml  user plugins and their configuration
 configs/extract/            extraction configs
 ```
 
-`extract` needs only `mcap`, `numpy` and `PyYAML`, so it can also run outside
-the container: `PYTHONPATH=src python3 -m bagpipe extract CONFIG.yaml`.
+Dependencies are declared in `pyproject.toml` and locked in `uv.lock`; the
+`bagpipe` wrapper runs `python -m bagpipe` from `.venv` (or the container
+fallback), so `uv run python -m bagpipe ...` in the checkout is equivalent.
 
 ---
 
 ## Troubleshooting
 
 * **`bagpipe: command not found`**: Add `~/.local/bin` to your `$PATH`, or re-run `./scripts/install.sh`.
-* **`refusing to mount <path>`**: the input or output path resolves to a directory that would shadow the container's own filesystem (e.g. `/usr/lib`, or a bare `/home`). Pass a more specific path.
 * **Tab completion not working**: it is installed to `~/.local/share/bash-completion/completions/`; start a new shell, and make sure the `bash-completion` package is installed.
-* **Changes to code not appearing**: The `src` folder is mounted. Changes apply immediately. If you add *system dependencies* (pip/apt), run `docker compose build converter`.
+* **Changes to code not appearing**: Code runs from the checkout in both runtimes, so changes apply immediately. After changing dependencies in `pyproject.toml`, run `uv lock` (and rebuild the image for the container fallback).
 * **Custom Messages not showing in Foxglove**: Ensure the plugin emits a standard type (e.g., `std_msgs/String`) or provides a valid definition override in the return tuple.
 
 ---
@@ -478,11 +486,17 @@ the container: `PYTHONPATH=src python3 -m bagpipe extract CONFIG.yaml`.
 
 ## Maintainer Guide
 
-To update the system dependencies (Dockerfile):
+Dependencies are declared in `pyproject.toml` and pinned in `uv.lock`:
 
-1. **Login:** `echo $GITHUB_TOKEN | docker login ghcr.io -u USER --password-stdin`
-2. **Build:** `./scripts/build-image.sh`
-3. **Push:** `./scripts/push-image.sh`
+1. **Change dependencies:** edit `pyproject.toml`, then `uv lock`. The native
+   runtime picks the change up on the next run.
+2. **Container fallback:** rebuild and push the dependency image whenever
+   `uv.lock` changes:
+   * **Login:** `echo $GITHUB_TOKEN | docker login ghcr.io -u USER --password-stdin`
+   * **Build:** `./scripts/build-image.sh` (builds `Dockerfile.bagpipe` as `ghcr.io/comrob/bagpipe`)
+   * **Push:** `./scripts/push-image.sh`
+
+`Dockerfile` (ROS Noetic) is only for the ROS 1 development environment, Part 2.
 
 Bump the `VERSION` file when the user-facing behavior of the tool changes; it is
 what `bagpipe info` and `bagpipe --version` report.

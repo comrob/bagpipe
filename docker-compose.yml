@@ -19,16 +19,15 @@ services:
       - /media:/media:rw
     command: tail -f /dev/null
 
-  converter:
-    image: ghcr.io/comrob/ros_bag_converter:${BAGPIPE_IMAGE_TAG:-latest}
-    build: .
-    container_name: bag_converter_runner
+  # Container fallback for bagpipe, used when uv is not installed (see
+  # lib/common.sh). The image holds only the locked dependencies; the code runs
+  # from this checkout. Host directories are mounted per invocation.
+  bagpipe:
+    image: ghcr.io/comrob/bagpipe:${BAGPIPE_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.bagpipe
+    init: true
     restart: "no"
     user: "${CURRENT_UID:-1000}:${CURRENT_GID:-1000}"
-    # Data volumes and the working directory are supplied per invocation by
-    # bagpipe, which mounts host paths at their own paths inside the container.
-    environment:
-      - PYTHONPATH=/home/dev/src
-    volumes:
-      - ./src:/home/dev/src
-    command: python3 -m bagpipe --help
+    command: python -m bagpipe --help

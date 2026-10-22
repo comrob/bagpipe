@@ -2,7 +2,7 @@
 set -e
 
 ORG="${ORG:-comrob}"
-IMAGE="${IMAGE:-ros_bag_converter}"
+IMAGE="${IMAGE:-bagpipe}"
 TAG="${TAG:-latest}"
 FULL="ghcr.io/$ORG/$IMAGE:$TAG"
 

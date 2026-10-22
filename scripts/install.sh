@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 INSTALL_TARGET="${INSTALL_TARGET:-$REPO_ROOT}"
 
-# `bagpipe update` re-runs this to refresh links; it pulls the image itself.
+# `bagpipe update` re-runs this to refresh links; it syncs or pulls itself.
 PULL_IMAGE=true
 [[ "${1:-}" == "--no-pull" ]] && PULL_IMAGE=false
 
@@ -46,10 +46,20 @@ if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-if $PULL_IMAGE; then
-    echo "Pulling container image so the first run is fast..."
-    BAGPIPE_IMAGE_TAG="${BAGPIPE_IMAGE_TAG:-latest}" \
-        docker compose -f "$INSTALL_TARGET/docker-compose.yml" pull converter
+# Native runtime when uv is available; otherwise the container fallback.
+if command -v uv >/dev/null 2>&1; then
+    if $PULL_IMAGE; then
+        echo "Setting up the Python environment from uv.lock..."
+        uv sync --project "$INSTALL_TARGET" --locked --quiet
+    fi
+else
+    echo "uv not found: bagpipe will run in a container. For the faster native runtime:"
+    echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+    if $PULL_IMAGE; then
+        echo "Pulling container image so the first run is fast..."
+        BAGPIPE_IMAGE_TAG="${BAGPIPE_IMAGE_TAG:-latest}" \
+            docker compose -f "$INSTALL_TARGET/docker-compose.yml" pull bagpipe
+    fi
 fi
 
 echo ""

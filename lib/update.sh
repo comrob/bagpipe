@@ -116,10 +116,15 @@ bp_cmd_update() {
         return 1
     fi
 
-    printf '%s\n' "${BP_BOLD}==>${BP_OFF} Pulling container image $(bp_image_ref)"
-    if ! BAGPIPE_IMAGE_TAG="${BAGPIPE_IMAGE_TAG:-latest}" \
-         docker compose -f "$BP_COMPOSE" pull converter; then
-        bp_warn "image pull failed; the previously pulled image is still in place."
+    if [[ "$(bp_runtime 2>/dev/null)" == native ]]; then
+        printf '%s\n' "${BP_BOLD}==>${BP_OFF} Syncing the Python environment from uv.lock"
+        bp_sync_venv || return 1
+    else
+        printf '%s\n' "${BP_BOLD}==>${BP_OFF} Pulling container image $(bp_image_ref)"
+        if ! BAGPIPE_IMAGE_TAG="${BAGPIPE_IMAGE_TAG:-latest}" \
+             docker compose -f "$BP_COMPOSE" pull bagpipe; then
+            bp_warn "image pull failed; the previously pulled image is still in place."
+        fi
     fi
 
     printf '%s\n' "${BP_BOLD}==>${BP_OFF} Refreshing links and completion"

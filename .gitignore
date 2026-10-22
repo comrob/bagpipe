@@ -1,4 +1,4 @@
 catkin_ws/src/*
 **/__pycache__/
 **/*.pyc
-catkin_ws/*
+catkin_ws/*.venv/

@@ -55,18 +55,25 @@ bp_cmd_info() {
         dirty=""
     fi
 
-    image_ref="$(bp_image_ref)"
-    image_id="$(docker image inspect --format '{{index .RepoDigests 0}}' "$image_ref" 2>/dev/null)"
-    [[ -z "$image_id" ]] && image_id="$(docker image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null)"
-    [[ -z "$image_id" ]] && image_id="(not pulled yet -- run: bagpipe update)"
-    image_created="$(docker image inspect --format '{{.Created}}' "$image_ref" 2>/dev/null | cut -dT -f1)"
-    [[ -n "$image_created" ]] && image_created=" created $image_created"
+    local runtime runtime_detail
+    runtime="$(bp_runtime 2>/dev/null || echo invalid)"
+    if [[ "$runtime" == native ]]; then
+        local py="(environment not created yet -- run any command, or: bagpipe update)"
+        [[ -x "$(bp_venv)/bin/python" ]] && py="Python $("$(bp_venv)/bin/python" -c 'import platform; print(platform.python_version())')"
+        runtime_detail="$(uv --version 2>/dev/null | cut -d" " -f1-2), $py, $(bp_venv)"
+    else
+        image_ref="$(bp_image_ref)"
+        image_id="$(docker image inspect --format '{{index .RepoDigests 0}}' "$image_ref" 2>/dev/null)"
+        [[ -z "$image_id" ]] && image_id="$(docker image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null)"
+        [[ -z "$image_id" ]] && image_id="(not pulled yet -- run: bagpipe update)"
+        image_created="$(docker image inspect --format '{{.Created}}' "$image_ref" 2>/dev/null | cut -dT -f1)"
+        runtime_detail="$image_ref, ${image_id}${image_created:+ created $image_created}"
+    fi
 
     printf '%sbagpipe %s%s\n' "$BP_BOLD" "$BP_VERSION" "$BP_OFF"
     printf '  wrapper    %s\n' "$self_link"
     printf '  checkout   %s  (%s%s)\n' "$BP_REPO" "$commit" "$dirty"
-    printf '  image      %s\n' "$image_ref"
-    printf '             %s%s\n' "$image_id" "$image_created"
+    printf '  runtime    %s  (%s)\n' "$runtime" "$runtime_detail"
     printf '  plugins    %s user, %s system\n' \
         "$(_bp_count_plugins "$BP_REPO/src/plugins")" \
         "$(_bp_count_plugins "$BP_REPO/src/bagpipe/convert/system_plugins")"

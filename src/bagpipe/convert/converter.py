@@ -25,6 +25,11 @@ from .std_defs import get_std_def
 PACKAGE_DIR = Path(__file__).resolve().parent
 USER_PLUGIN_ROOT = PACKAGE_DIR.parents[1]
 
+def msgdef_text(conn) -> str:
+    """A connection's message definition as text (rosbags >= 0.10 wraps it in MessageDefinition)."""
+    msgdef = conn.msgdef
+    return getattr(msgdef, "data", msgdef)
+
 # --- Business Logic ---
 class BagSeriesConverter:
     # [MODIFIED] Added skip_topics argument
@@ -154,11 +159,11 @@ class BagSeriesConverter:
 
                     if not is_standard_ros1:
                         msg_def = None
-                        if hasattr(conn, 'msgdef'): msg_def = conn.msgdef
+                        if hasattr(conn, 'msgdef'): msg_def = msgdef_text(conn)
                         elif hasattr(conn, 'ext'):
                              if isinstance(conn.ext, dict): msg_def = conn.ext.get('message_definition', None)
                              elif hasattr(conn.ext, 'message_definition'): msg_def = conn.ext.message_definition
-                        if not msg_def and conn.msgtype in reader.msgtypes: msg_def = reader.msgtypes[conn.msgtype]
+                        if not msg_def and conn.msgtype in getattr(reader, 'msgtypes', {}): msg_def = reader.msgtypes[conn.msgtype]
                         
                         if msg_def:
                             try: self.store_ros1.register(get_types_from_msg(msg_def, ros1_type))
@@ -174,7 +179,7 @@ class BagSeriesConverter:
 
                     msg_def_for_schema = ""
                     try:
-                         if hasattr(conn, 'msgdef'): msg_def_for_schema = conn.msgdef
+                         if hasattr(conn, 'msgdef'): msg_def_for_schema = msgdef_text(conn)
                     except: pass
                     
                     if not msg_def_for_schema:
