@@ -5,7 +5,7 @@ from typing import Any, List, Tuple, Optional
 
 # Import ROS2 String type
 from rosbags.typesys.stores.ros2_humble import std_msgs__msg__String as StringMsg
-from plugin_manager import BasePlugin
+from bagpipe.convert.plugin_manager import BasePlugin
 
 class RobustelFixPlugin(BasePlugin):
     def process(self, topic: str, msg: Any, msg_type: str, timestamp: int) -> Tuple[List[Tuple[str, Any, str, Optional[str]]], bool]:

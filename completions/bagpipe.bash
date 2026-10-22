@@ -21,12 +21,34 @@ _bagpipe_convert_args() {
 
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "--series --distro --out-dir --split-size \
-            --with-plugins --dry-run --skip-topics --help" -- "$cur") )
+            --with-plugins --dry-run --skip-topics --no-resume --help" -- "$cur") )
         return
     fi
 
     # Bags are given as .bag files or as a folder containing them.
     COMPREPLY=( $(compgen -f -X '!*.bag' -- "$cur") $(compgen -d -- "$cur") )
+    compopt -o filenames 2>/dev/null
+}
+
+_bagpipe_extract_args() {
+    local cur="$1" prev="$2"
+
+    case "$prev" in
+        --config|--reuse)
+            COMPREPLY=( $(compgen -f -- "$cur") )
+            compopt -o filenames 2>/dev/null
+            return
+            ;;
+    esac
+
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--config --topics --start --duration --reuse \
+            --threads --batch-mb --help" -- "$cur") )
+        return
+    fi
+
+    # A YAML config, or source/output .mcap files.
+    COMPREPLY=( $(compgen -f -X '!*.@(yaml|yml|mcap)' -- "$cur") $(compgen -d -- "$cur") )
     compopt -o filenames 2>/dev/null
 }
 
@@ -36,7 +58,7 @@ _bagpipe() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     if (( COMP_CWORD == 1 )); then
-        COMPREPLY=( $(compgen -W "convert plugins shell info update help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "convert extract plugins shell info update help" -- "$cur") )
         return
     fi
 
@@ -44,6 +66,9 @@ _bagpipe() {
     case "$cmd" in
         convert)
             _bagpipe_convert_args "$cur" "$prev"
+            ;;
+        extract)
+            _bagpipe_extract_args "$cur" "$prev"
             ;;
         shell)
             COMPREPLY=( $(compgen -d -- "$cur") )

@@ -87,15 +87,30 @@ bp_mount_for_arg() {
     printf '%s\n' "$anc"
 }
 
+# Absolute paths written inside a YAML config, one per line. Topic names such as
+# /tf come out too, and are dropped by bp_mount_for_arg like on the command line.
+bp_paths_in_yaml() {
+    grep -v '^[[:space:]]*#' -- "$1" 2>/dev/null | grep -oE '(^|[[:space:]"'"'"'])/[^[:space:]"'"'"',#]+' \
+        | sed -E 's/^[[:space:]"'"'"']//'
+}
+
 # Populates the BP_MOUNTS array from the given arguments plus $PWD.
+# A YAML file among the arguments contributes the paths written inside it.
 # Nested paths collapse into their ancestor; forbidden targets abort.
 bp_compute_mounts() {
     local -a raw=()
-    local arg m
+    local arg m inner
 
     for arg in "$@"; do
         m="$(bp_mount_for_arg "$arg")"
         [[ -n "$m" ]] && raw+=("$m")
+        local file="${arg#--*=}"
+        if [[ -f "$file" && ( "$file" == *.yaml || "$file" == *.yml ) ]]; then
+            while read -r inner; do
+                m="$(bp_mount_for_arg "$inner")"
+                [[ -n "$m" ]] && raw+=("$m")
+            done < <(bp_paths_in_yaml "$file")
+        fi
     done
 
     # $PWD is mounted so relative arguments and the working directory resolve.

@@ -1,7 +1,7 @@
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from plugin_manager import BasePlugin
+from bagpipe.convert.plugin_manager import BasePlugin
 
 
 class _StringMsgProxy:

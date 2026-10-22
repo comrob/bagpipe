@@ -9,7 +9,7 @@ from rosbags.typesys.stores.ros2_humble import (
     nav_msgs__msg__Odometry as OdometryMsg,
 )
 
-from plugin_manager import BasePlugin
+from bagpipe.convert.plugin_manager import BasePlugin
 
 
 class PoseToOdometryPlugin(BasePlugin):

@@ -3,6 +3,7 @@ import os
 import argparse
 import traceback
 import time
+from collections import Counter
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
@@ -14,10 +15,15 @@ from rosbags.typesys import get_types_from_msg, get_typestore, Stores
 from mcap.well_known import SchemaEncoding, MessageEncoding, Profile
 
 # Local Modules
-import convert_utils
-import writer as mcap_writer_utils
-from plugin_manager import PluginManager
-from std_defs import get_std_def
+from . import utils as convert_utils
+from ..mcap_io import writer as mcap_writer_utils
+from .plugin_manager import PluginManager
+from .std_defs import get_std_def
+
+# System plugins ship with the package; user plugins and their config live in
+# src/ next to it, where they are edited (src/ is mounted into the container).
+PACKAGE_DIR = Path(__file__).resolve().parent
+USER_PLUGIN_ROOT = PACKAGE_DIR.parents[1]
 
 # --- Business Logic ---
 class BagSeriesConverter:
@@ -34,12 +40,12 @@ class BagSeriesConverter:
         
         self.current_topic_errors = {}
         
-        self.plugin_dir = Path(__file__).parent / "plugins"
-        self.system_plugin_dir = Path(__file__).parent / "system_plugins"
+        self.plugin_dir = USER_PLUGIN_ROOT / "plugins"
+        self.system_plugin_dir = PACKAGE_DIR / "system_plugins"
         self.plugin_config_path = None
-        self.system_plugin_config_path = Path(__file__).parent / "system_plugins.yaml"
+        self.system_plugin_config_path = PACKAGE_DIR / "system_plugins.yaml"
         if enable_plugins:
-            self.plugin_config_path = Path(__file__).parent / "plugins.yaml"
+            self.plugin_config_path = USER_PLUGIN_ROOT / "plugins.yaml"
         
         self.plugin_manager = PluginManager(
             plugin_dir_path=self.plugin_dir,
@@ -53,7 +59,46 @@ class BagSeriesConverter:
         self.store_ros1 = get_typestore(Stores.ROS1_NOETIC)
         self.store_ros2 = get_typestore(Stores.ROS2_HUMBLE)
 
-    def convert_file(self, src: Path, base_dst: Path, split_size: int = 0, is_part_of_series: bool = False) -> List[Dict]:
+    def convert_message(self, conn, timestamp: int, raw_data: bytes):
+        """Runs one bag message through system plugins, ROS1->ROS2 conversion and user plugins.
+        Yields (topic, msg, type, definition_override) for every emission to write."""
+        ros1_msg = self.store_ros1.deserialize_ros1(raw_data, conn.msgtype)
+        pre_emissions = self.plugin_manager.run_system_plugins(conn.topic, ros1_msg, conn.msgtype, timestamp)
+
+        for (pre_topic, pre_msg, pre_type, _) in pre_emissions:
+            if pre_msg is None:
+                continue
+
+            # Keep blacklist behavior even if system plugin rewrites topics.
+            if pre_topic in self.skip_topics:
+                continue
+
+            ros2_type_for_msg = convert_utils.to_ros2_type(pre_type)
+            ros2_msg = convert_utils.convert_ros1_to_ros2(pre_msg, ros2_type_for_msg, self.store_ros2)
+
+            emissions = self.plugin_manager.run_user_plugins(pre_topic, ros2_msg, ros2_type_for_msg, timestamp)
+
+            for (out_topic, out_msg, out_type, out_def) in emissions:
+                if out_msg is None: continue
+
+                # [MODIFIED] Check blacklist for plugin emissions
+                if out_topic in self.skip_topics: continue
+
+                yield out_topic, out_msg, out_type, out_def
+
+    def collect_static_tf(self, reader: Reader, stop: int):
+        """Fills the /tf_static cache from the part of a bag before a resume point,
+        so later files of a series get the same injection as in an uninterrupted run."""
+        conns = [c for c in reader.connections if c.topic == convert_utils.TF_STATIC_TOPIC]
+        if not conns: return  # an empty list would mean "all connections"
+        for conn, timestamp, raw_data in reader.messages(connections=conns, stop=stop):
+            try:
+                for (out_topic, out_msg, _, _) in self.convert_message(conn, timestamp, raw_data):
+                    if out_topic == convert_utils.TF_STATIC_TOPIC: self.static_tf_cache.append(out_msg)
+            except Exception:
+                pass  # reported when this part of the bag was converted
+
+    def convert_file(self, src: Path, base_dst: Path, split_size: int = 0, is_part_of_series: bool = False, resume: bool = True) -> List[Dict]:
         if not self.store_ros1: self.init_stores()
 
         print(f"[INFO] Processing: {src.name}")
@@ -64,7 +109,7 @@ class BagSeriesConverter:
 
         with Reader(src) as reader:
             # NOTE: Writer now handles the .part temporary naming internally
-            writer = mcap_writer_utils.RollingMcapWriter(base_dst, split_size, Profile.ROS2)
+            writer = mcap_writer_utils.RollingMcapWriter(base_dst, split_size, Profile.ROS2, resume=resume)
             
             current_stats = {
                 "source_bag": src.name, 
@@ -73,6 +118,16 @@ class BagSeriesConverter:
                 "start_time": None, "end_time": None,
                 "message_count": 0, "topics": {}
             }
+
+            # Continuing an interrupted run: the bag is read from the last written timestamp
+            resume_time: Optional[int] = None
+            already_written: Counter = Counter()
+            if writer.resumed:
+                *done_stats, current_stats = writer.resumed_stats()
+                for stat in done_stats + [current_stats]:
+                    stat["source_bag"] = src.name
+                all_file_stats.extend(done_stats)
+                resume_time, already_written = writer.resume_point()
             
             # ... [Initialize maps... Same as before] ...
             topic_to_chan_id = {}
@@ -146,12 +201,12 @@ class BagSeriesConverter:
                         )
                         topic_to_chan_id[conn.topic] = cid
                         topic_to_type[conn.topic] = ros2_type
-                        current_stats["topics"][conn.topic] = {"count": 0, "type": ros2_type}
+                        current_stats["topics"].setdefault(conn.topic, {"count": 0, "type": ros2_type})
 
                     conn_map[conn.id] = topic_to_chan_id[conn.topic]
 
                 # --- INJECTION LOGIC ---
-                if is_part_of_series and self.static_tf_cache and not self.exiter.stop_requested:
+                if is_part_of_series and self.static_tf_cache and resume_time is None and not self.exiter.stop_requested:
                     # [MODIFIED] Ensure static TF injection respects skip list too
                     if convert_utils.TF_STATIC_TOPIC not in self.skip_topics:
                         chan_id = 0
@@ -188,15 +243,22 @@ class BagSeriesConverter:
                 end_ns = reader.end_time or 0
                 total_duration_sec = (end_ns - start_ns) / 1e9
                 last_ts = start_ns
+
+                if resume_time is not None and not self.exiter.stop_requested:
+                    last_ts = resume_time
+                    print(f"[INFO] Resuming at {(resume_time - start_ns) / 1e9:.1f}s of {total_duration_sec:.1f}s "
+                          f"({current_stats['message_count']} messages already in {writer.current_file_path.name}).")
+                    if is_part_of_series:
+                        self.collect_static_tf(reader, stop=resume_time)
                 
                 # Context manager logic (same as original)
                 if total_duration_sec <= 0.001:
                      context_manager = convert_utils.NoOpContextManager()
                 else:
-                     context_manager = tqdm(total=total_duration_sec, unit="s", desc="Converting", leave=False, bar_format="{l_bar}{bar}| {n:.2f}/{total:.2f}s [{elapsed}<{remaining}, {rate_fmt}]")
+                     context_manager = tqdm(total=total_duration_sec, initial=(last_ts - start_ns) / 1e9, unit="s", desc="Converting", leave=False, bar_format="{l_bar}{bar}| {n:.2f}/{total:.2f}s [{elapsed}<{remaining}, {rate_fmt}]")
 
                 with context_manager as pbar:
-                    for conn, timestamp, raw_data in reader.messages():
+                    for conn, timestamp, raw_data in reader.messages(start=resume_time):
                         if self.exiter.stop_requested: break
                         if conn.id not in conn_map: continue
                         
@@ -222,61 +284,46 @@ class BagSeriesConverter:
                             writer.just_rotated = False
 
                         try:
-                            ros1_msg = self.store_ros1.deserialize_ros1(raw_data, conn.msgtype)
-                            pre_emissions = self.plugin_manager.run_system_plugins(conn.topic, ros1_msg, conn.msgtype, timestamp)
+                            for (out_topic, out_msg, out_type, out_def) in self.convert_message(conn, timestamp, raw_data):
+                                if out_topic in topic_to_type and topic_to_type[out_topic] != out_type:
+                                    safe_type_suffix = out_type.replace("/", "_")
+                                    out_topic = f"{out_topic}__{safe_type_suffix}"
 
-                            for (pre_topic, pre_msg, pre_type, _) in pre_emissions:
-                                if pre_msg is None:
-                                    continue
-
-                                # Keep blacklist behavior even if system plugin rewrites topics.
-                                if pre_topic in self.skip_topics:
-                                    continue
-
-                                ros2_type_for_msg = convert_utils.to_ros2_type(pre_type)
-                                ros2_msg = convert_utils.convert_ros1_to_ros2(pre_msg, ros2_type_for_msg, self.store_ros2)
-
-                                emissions = self.plugin_manager.run_user_plugins(pre_topic, ros2_msg, ros2_type_for_msg, timestamp)
-
-                                for (out_topic, out_msg, out_type, out_def) in emissions:
-                                    if out_msg is None: continue
-                                
-                                    # [MODIFIED] Check blacklist for plugin emissions
-                                    if out_topic in self.skip_topics: continue
-
-                                    if out_topic in topic_to_type and topic_to_type[out_topic] != out_type:
-                                        safe_type_suffix = out_type.replace("/", "_")
-                                        out_topic = f"{out_topic}__{safe_type_suffix}"
-
-                                    if out_topic not in topic_to_chan_id:
-                                        if out_type not in registered_schemas:
-                                            schema_text = out_def
-                                            if schema_text is None: schema_text = get_std_def(out_type)
-                                            if schema_text is None: schema_text = f"# Definition for {out_type} missing"
-
-                                            sid = writer.register_schema(name=out_type, encoding=SchemaEncoding.ROS2, data=schema_text.encode('utf-8'))
-                                            registered_schemas[out_type] = sid
-                                        
-                                        cid = writer.register_channel(topic=out_topic, message_encoding=MessageEncoding.CDR, schema_id=registered_schemas[out_type], metadata={"offered_qos_profiles": ""})
-                                        topic_to_chan_id[out_topic] = cid
-                                        topic_to_type[out_topic] = out_type
-                                        current_stats["topics"][out_topic] = {"count": 0, "type": out_type}
-
-                                    cdr_bytes = self.store_ros2.serialize_cdr(out_msg, out_type)
-
-                                    writer.add_message(channel_id=topic_to_chan_id[out_topic], log_time=int(timestamp), publish_time=int(timestamp), data=cdr_bytes)
-
+                                if timestamp == resume_time and already_written[out_topic] > 0:
+                                    # Written before the interruption (a chunk ended partway through this timestamp)
+                                    already_written[out_topic] -= 1
                                     if out_topic == convert_utils.TF_STATIC_TOPIC: self.static_tf_cache.append(out_msg)
+                                    continue
 
-                                    if out_topic in current_stats["topics"]:
-                                        current_stats["topics"][out_topic]["count"] += 1
-                                    else:
-                                        current_stats["topics"][out_topic] = {"count": 1, "type": out_type}
+                                if out_topic not in topic_to_chan_id:
+                                    if out_type not in registered_schemas:
+                                        schema_text = out_def
+                                        if schema_text is None: schema_text = get_std_def(out_type)
+                                        if schema_text is None: schema_text = f"# Definition for {out_type} missing"
+
+                                        sid = writer.register_schema(name=out_type, encoding=SchemaEncoding.ROS2, data=schema_text.encode('utf-8'))
+                                        registered_schemas[out_type] = sid
                                     
-                                    current_stats["message_count"] += 1
-                                        
-                                    if current_stats["start_time"] is None or timestamp < current_stats["start_time"]: current_stats["start_time"] = timestamp
-                                    if current_stats["end_time"] is None or timestamp > current_stats["end_time"]: current_stats["end_time"] = timestamp
+                                    cid = writer.register_channel(topic=out_topic, message_encoding=MessageEncoding.CDR, schema_id=registered_schemas[out_type], metadata={"offered_qos_profiles": ""})
+                                    topic_to_chan_id[out_topic] = cid
+                                    topic_to_type[out_topic] = out_type
+                                    current_stats["topics"].setdefault(out_topic, {"count": 0, "type": out_type})
+
+                                cdr_bytes = self.store_ros2.serialize_cdr(out_msg, out_type)
+
+                                writer.add_message(channel_id=topic_to_chan_id[out_topic], log_time=int(timestamp), publish_time=int(timestamp), data=cdr_bytes)
+
+                                if out_topic == convert_utils.TF_STATIC_TOPIC: self.static_tf_cache.append(out_msg)
+
+                                if out_topic in current_stats["topics"]:
+                                    current_stats["topics"][out_topic]["count"] += 1
+                                else:
+                                    current_stats["topics"][out_topic] = {"count": 1, "type": out_type}
+                                
+                                current_stats["message_count"] += 1
+                                    
+                                if current_stats["start_time"] is None or timestamp < current_stats["start_time"]: current_stats["start_time"] = timestamp
+                                if current_stats["end_time"] is None or timestamp > current_stats["end_time"]: current_stats["end_time"] = timestamp
                         
                         except Exception as e:
                             print(f"[ERR] Conversion failed on topic {conn.topic}: {e}", file=sys.stderr)
@@ -312,8 +359,8 @@ class BagSeriesConverter:
 
         return all_file_stats
 
-def main():
-    parser = argparse.ArgumentParser(description="Convert ROS1 bags to MCAP.")
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="bagpipe convert", description="Convert ROS1 bags to MCAP.")
     parser.add_argument("inputs", nargs='+', help="Input .bag files or a folder")
     parser.add_argument("--series", action="store_true", help="Treat inputs as a split sequence")
     parser.add_argument("--distro", default="humble", help="ROS distro for metadata")
@@ -323,8 +370,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Validate paths and config without running conversion")
     # [MODIFIED] Added argument for skipping topics
     parser.add_argument("--skip-topics", nargs='+', default=[], help="List of topics to skip (blacklist)")
+    parser.add_argument("--no-resume", action="store_true", help="Ignore partial output (.mcap.part / .mcap.incomplete) left by an interrupted run and convert from scratch")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     
     
     # print arguments for verification
@@ -336,6 +384,7 @@ def main():
     print(f"Enable Plugins: {args.with_plugins}")
     print(f"Dry Run: {args.dry_run}")
     print(f"Topics to Skip: {args.skip_topics}")
+    print(f"Resume Partial Output: {not args.no_resume}")
     
     try:
         split_bytes = mcap_writer_utils.parse_size(args.split_size)
@@ -397,7 +446,8 @@ def main():
         stats_list = converter.convert_file(
             f, dst, 
             split_size=split_bytes, 
-            is_part_of_series=args.series
+            is_part_of_series=args.series,
+            resume=not args.no_resume
         )
         
         # [NEW] Collect errors

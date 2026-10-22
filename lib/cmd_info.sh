@@ -69,7 +69,7 @@ bp_cmd_info() {
     printf '             %s%s\n' "$image_id" "$image_created"
     printf '  plugins    %s user, %s system\n' \
         "$(_bp_count_plugins "$BP_REPO/src/plugins")" \
-        "$(_bp_count_plugins "$BP_REPO/src/system_plugins")"
+        "$(_bp_count_plugins "$BP_REPO/src/bagpipe/convert/system_plugins")"
     printf '  state      %s\n' "$BP_STATE"
     printf '  updates    %s\n' "$(_bp_update_status)"
 }

@@ -28,6 +28,7 @@ ${BP_BOLD}Usage:${BP_OFF}
 
 ${BP_BOLD}Commands:${BP_OFF}
   convert <input> [opts]   Convert ROS1 .bag files to ROS2 .mcap
+  extract <config.yaml>    Copy selected topics out of a large .mcap (resumable)
   plugins                  List available plugins and their configuration
   shell                    Open a shell in the container, in the current directory
   info                     Show version, paths, image and update status
@@ -80,6 +81,7 @@ main() {
     local status=0
     case "$cmd" in
         convert)        bp_cmd_convert "$@" || status=$? ;;
+        extract)        bp_cmd_extract "$@" || status=$? ;;
         plugins)        bp_cmd_plugins "$@" || status=$? ;;
         shell)          bp_cmd_shell "$@" || status=$? ;;
         info)           bp_cmd_info "$@" || status=$? ;;

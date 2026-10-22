@@ -2,7 +2,7 @@ import sys
 import cv2
 import numpy as np
 from typing import Any, List, Tuple, Optional
-from plugin_manager import BasePlugin
+from bagpipe.convert.plugin_manager import BasePlugin
 
 class DebayerDebugPlugin(BasePlugin):
     def process(self, topic: str, msg: Any, msg_type: str, timestamp: int) -> Tuple[List[Tuple[str, Any, str, Optional[str]]], bool]:

@@ -29,8 +29,8 @@ _bp_list_plugin_dir() {
 }
 
 bp_cmd_plugins() {
-    _bp_list_plugin_dir "$BP_REPO/src/system_plugins" \
-                        "$BP_REPO/src/system_plugins.yaml" \
+    _bp_list_plugin_dir "$BP_REPO/src/bagpipe/convert/system_plugins" \
+                        "$BP_REPO/src/bagpipe/convert/system_plugins.yaml" \
                         "System plugins (always on)"
     printf '\n'
     _bp_list_plugin_dir "$BP_REPO/src/plugins" \

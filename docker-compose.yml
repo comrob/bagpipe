@@ -27,6 +27,8 @@ services:
     user: "${CURRENT_UID:-1000}:${CURRENT_GID:-1000}"
     # Data volumes and the working directory are supplied per invocation by
     # bagpipe, which mounts host paths at their own paths inside the container.
+    environment:
+      - PYTHONPATH=/home/dev/src
     volumes:
       - ./src:/home/dev/src
-    command: python3 /home/dev/src/convert.py --help
+    command: python3 -m bagpipe --help
